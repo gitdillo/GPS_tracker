@@ -1,4 +1,4 @@
-from machine import Pin, UART, I2C
+from machine import Pin, UART, I2C, RTC
 
 import utime
 
@@ -9,18 +9,29 @@ rxpin = 1
 
 
 gpsModule = UART(UART_id, baudrate=baud, tx=Pin(txpin), rx=Pin(rxpin))
+machine_rtc = machine.RTC()
 
 buff = bytearray(255)
 
 TIMEOUT = False
-FIX_STATUS = False
 GPS_present = False
 
-latitude = ""
-longitude = ""
-satellites = ""
-GPS_time = ""
+LATITUDE = None
+LONGITUDE = None
+SATELLITES = None
+GPS_timestring = None
+GPS_datestring = None
+HDOP = None
+GPS_fix_quality = None
+POSITION_STATUS = None
+SPEED_knots = None
 
+def set_system_time(year, month, day, hours, minutes, seconds):
+    # the arg for RTC.datetime() is tuple: (year, month, day, weekday, hours, minutes, seconds, subseconds)
+    # we set weekday=0 (auto) and subseconds=0 since it is ignored anyway
+    global machine_rtc
+    machine_rtc.datetime((year, month, day, 0, hours, minutes, seconds, 0))    
+    
 
 def fetch_GPS_message(gpsModule, timeout_sec=3, retry_period_ms = 100):
     
@@ -62,8 +73,6 @@ def fetch_GPS_message(gpsModule, timeout_sec=3, retry_period_ms = 100):
     
 def parse_message(msg):
     
-    global FIX_STATUS, TIMEOUT, latitude, longitude, satellites, GPS_time, GPS_present
-    
     parts = msg.split(',')
     
     msg_type = parts[0][1:]
@@ -91,45 +100,66 @@ def parse_message(msg):
 
 def _parse_GPRMC(msg_parts):
     
+    global GPS_timestring, GPS_datestring, LATITUDE, LONGITUDE, SPEED_knots, POSITION_STATUS
+    
     if msg_parts[0] == '$GPRMC' and len(msg_parts) == 13:
-        if (msg_parts[1] and msg_parts[2] and msg_parts[3] and msg_parts[4] and msg_parts[5] and msg_parts[6] and msg_parts[7] and msg_parts[8] and msg_parts[9]):
+        # we ignore msg_parts[7] (Track made good) because it is often empty
+        if (msg_parts[1] and msg_parts[2] and msg_parts[3] and msg_parts[4] and msg_parts[5] and msg_parts[6] and msg_parts[7] and msg_parts[9]):
             
-            latitude = convertToDegree(msg_parts[3])
+            LATITUDE = convertToDegree(msg_parts[3])
             if (msg_parts[4] == 'S'):
-                latitude = -latitude
+                LATITUDE = -LATITUDE
+            
+            LONGITUDE = convertToDegree(msg_parts[5])
+            if (msg_parts[6] == 'W'):
+                LONGITUDE = -LONGITUDE
+            
+            # Time lives in msg_parts[1]
+            GPS_timestring = msg_parts[1]
+            hours = int(GPS_timestring[0:2])
+            minutes = int(GPS_timestring[2:4])
+            seconds = int(GPS_timestring[4:6]) # ignore subsecods, not implemented
+            
+            # Date lives in msg_parts[9]
+            GPS_datestring = msg_parts[9]
+            day = int(GPS_datestring[:2])
+            month = int(GPS_datestring[2:4])
+            year = int('20' + GPS_datestring[4:])
+            
+            set_system_time(year, month, day, hours, minutes, seconds)
+            
+            POSITION_STATUS = msg_parts[2]
+            SPEED_knots = float(msg_parts[7])
             
         else:
             pass
     else:
         pass
-    
-    print(msg_parts)
-    print(len(msg_parts))
 
 def _parse_GPGGA(msg_parts):
     
-    global FIX_STATUS, TIMEOUT, latitude, longitude, satellites, GPS_time
+    global HDOP, LATITUDE, LONGITUDE, SATELLITES, GPS_timestring, GPS_fix_quality
     
     if msg_parts[0] == '$GPGGA' and len(msg_parts) == 15:
-        if (msg_parts[1] and msg_parts[2] and msg_parts[3] and msg_parts[4] and msg_parts[5] and msg_parts[6] and msg_parts[7]):
+        if (msg_parts[1] and msg_parts[2] and msg_parts[3] and msg_parts[4] and msg_parts[5] and msg_parts[6] and msg_parts[7] and msg_parts[8]):
             
-            latitude = convertToDegree(msg_parts[2])
+            LATITUDE = convertToDegree(msg_parts[2])
             if (msg_parts[3] == 'S'):
-                latitude = -latitude
+                LATITUDE = -LATITUDE
             
-            longitude = convertToDegree(msg_parts[4])
+            LONGITUDE = convertToDegree(msg_parts[4])
             if (msg_parts[5] == 'W'):
-                longitude = -longitude
+                LONGITUDE = -LONGITUDE
             
-            satellites = msg_parts[7]
-            GPS_time = msg_parts[1][0:2] + ":" + msg_parts[1][2:4] + ":" + msg_parts[1][4:6]
-            FIX_STATUS = True
+            # msg_parts[1] contains time info
+            GPS_fix_quality = int(msg_parts[6])
+            SATELLITES = int(msg_parts[7])
+            HDOP = float(msg_parts[8])
+            print('Fix type: ' + str(GPS_fix_quality) + ', HDOP: ' + str(HDOP))
             
         else:
-            # Inner if
             pass
     else:
-        # Outer if
         pass
 
 
@@ -142,42 +172,19 @@ def convertToDegree(RawDegrees):
     nexttwodigits = RawAsFloat - float(firstdigits*100) 
     
     Converted = float(firstdigits + nexttwodigits/60.0)
-    Converted = '{0:.6f}'.format(Converted) 
-    return str(Converted)
-    
+    # Converted = '{0:.6f}'.format(Converted)
+    return Converted
 
 
-
+update_seconds = 2
+t_last_update = utime.time()
+print('FIX TYPE: ' + str(GPS_fix_quality) + ', HDOP: ' + str(HDOP) + ', GPS present: ' + str(GPS_present))
 while True:
-    m = fetch_GPS_message(gpsModule)
-    if m[1:6] == 'GPRMC':
-        msg_parts = m.split(',')
-        if msg_parts[0] == '$GPRMC' and len(msg_parts) == 13:
-            if (msg_parts[1] and msg_parts[2] and msg_parts[3] and msg_parts[4] and msg_parts[5] and msg_parts[6] and msg_parts[7] and msg_parts[8] and msg_parts[9]):
-                break
-            else:
-                print('Shit: ' + str(msg_parts))
-        else:
-            print('Crap: ' + str(msg_parts))
-
-
-
-# log_timestamp = None
-# while True:
-#     m = fetch_GPS_message(gpsModule)
-#     msg_type = parse_message(m)
-#     if FIX_STATUS is True:
-#         print("GPS has a fix")
-#         log_timestamp = GPS_time
-#         #break
-#         
-# s = GPS_time + ',' + latitude + ',' + longitude
-# print(s)
     
-
-        
-
-
-
-
-
+    if utime.time() - t_last_update:
+        print('FIX TYPE: ' + str(GPS_fix_quality) + ', HDOP: ' + str(HDOP) + ', GPS present: ' + str(GPS_present))
+        t_last_update = utime.time()
+    
+    m = fetch_GPS_message(gpsModule)
+    parse_message(m)
+    
